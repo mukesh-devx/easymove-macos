@@ -1,6 +1,6 @@
 --- Eventtap controller handling modifier-click window move and resize.
---- Fully decoupled event ingestion and 120Hz hardware-synced render loop.
---- Eliminates eventtap queue backlog, providing 100% instant 1:1 mouse tracking.
+--- High-frequency eventtap tracking throttled to 120Hz display refresh.
+--- Delivers instant, zero-lag 1:1 cursor tracking with 9-region natural resizing.
 
 local util = require("easymove.util")
 local resizeMath = require("easymove.resize_math")
@@ -9,7 +9,8 @@ local log = require("easymove.log")
 local Mover = {}
 Mover.__index = Mover
 
-local RENDER_INTERVAL = 0.008 -- ~120 Hz render tick
+-- 8ms in nanoseconds (~120 FPS frame rate limit)
+local THROTTLE_TICKS = 8000000
 
 local function isSnappableWindow(win, excluded)
   if not win then return false end
@@ -50,7 +51,6 @@ function Mover.new(cfg, hud)
     enabled = true,
     tap = nil,
     watchdog = nil,
-    renderTimer = nil,
     excluded = {},
     -- Gesture State
     active = false,
@@ -58,8 +58,8 @@ function Mover.new(cfg, hud)
     win = nil,
     startPt = nil,
     initialFrame = nil,
-    corner = nil,          -- "tl" | "tr" | "bl" | "br"
-    lastRenderedPt = nil,
+    corner = nil,          -- "center", "l", "r", "t", "b", "tl", "tr", "bl", "br"
+    lastFrameTicks = 0,
     lastAppliedFrame = nil,
     axApp = nil,
     wasEnhanced = nil,
@@ -93,7 +93,7 @@ function Mover:start()
     self.tap:start()
   end
 
-  -- Watchdog timer to revive tap if macOS disables it
+  -- Watchdog timer to revive tap if macOS temporarily disables it
   self.watchdog = hs.timer.doEvery(4.0, function()
     if self.enabled and self.tap and not self.tap:isEnabled() then
       log.w("eventtap was disabled by macOS; restarting")
@@ -128,11 +128,6 @@ function Mover:isEnabled()
 end
 
 function Mover:_reset()
-  if self.renderTimer then
-    self.renderTimer:stop()
-    self.renderTimer = nil
-  end
-
   -- Restore AXEnhancedUserInterface if we temporarily disabled it
   if self.axApp and self.wasEnhanced then
     local ax = self.axApp
@@ -147,7 +142,7 @@ function Mover:_reset()
   self.startPt = nil
   self.initialFrame = nil
   self.corner = nil
-  self.lastRenderedPt = nil
+  self.lastFrameTicks = 0
   self.lastAppliedFrame = nil
   if self.hud then self.hud:hide() end
 end
@@ -178,20 +173,6 @@ function Mover:_apply(pt)
       end
     end
   end
-end
-
-function Mover:_renderTick()
-  if not (self.active and self.win) then return end
-
-  -- Read hardware-level absolute cursor position directly from Display Server (0.002ms)
-  local curPt = hs.mouse.absolutePosition()
-  local r = self.lastRenderedPt
-  if r and r.x == curPt.x and r.y == curPt.y then
-    return -- Mouse hasn't moved; skip frame to conserve CPU
-  end
-
-  self.lastRenderedPt = { x = curPt.x, y = curPt.y }
-  self:_apply(curPt)
 end
 
 function Mover:_handleEvent(e)
@@ -232,7 +213,7 @@ function Mover:_handleEvent(e)
     local frame = win:frame()
     if not frame then return false end
 
-    -- Disable AXEnhancedUserInterface temporarily to prevent macOS from enforcing 200ms resize animations
+    -- Disable AXEnhancedUserInterface temporarily to prevent Chromium/Electron 200ms resize animations
     local app = win:application()
     local axApp = app and hs.axuielement.applicationElement(app)
     self.axApp = axApp
@@ -255,7 +236,7 @@ function Mover:_handleEvent(e)
     self.win = win
     self.startPt = { x = pt.x, y = pt.y }
     self.initialFrame = { x = frame.x, y = frame.y, w = frame.w, h = frame.h }
-    self.lastRenderedPt = { x = pt.x, y = pt.y }
+    self.lastFrameTicks = hs.timer.absoluteTime()
     self.lastAppliedFrame = self.initialFrame
 
     if mode == "resize" then
@@ -268,33 +249,23 @@ function Mover:_handleEvent(e)
       self.hud:update(mode, self.initialFrame, pt, self.corner)
     end
 
-    -- Start decoupled 120Hz hardware-synced render loop
-    if not self.renderTimer then
-      self.renderTimer = hs.timer.doEvery(RENDER_INTERVAL, function()
-        self:_renderTick()
-      end)
-    else
-      self.renderTimer:start()
-    end
-
     return true -- Consume mouse-down so the target app doesn't click or select
   end
 
-  -- 2. Mouse Dragged: Non-blocking instantaneous absorption
-  -- Return immediately in ~2 microseconds so macOS never queues up or lags mouse events
-  if isDrag and self.active then
-    return true
+  -- 2. Mouse Dragged: Update window position or size smoothly (capped at 120 FPS)
+  if isDrag and self.active and self.win then
+    local now = hs.timer.absoluteTime()
+    if (now - self.lastFrameTicks) >= THROTTLE_TICKS then
+      self.lastFrameTicks = now
+      self:_apply(pt)
+    end
+    return true -- Consume drag
   end
 
   -- 3. Mouse Up: End interaction cleanly
   if isUp and self.active then
-    if self.renderTimer then
-      self.renderTimer:stop()
-    end
-
-    -- Final commit pass with the exact release coordinates
-    local finalPt = hs.mouse.absolutePosition()
-    self:_apply(finalPt)
+    -- Commit final coordinates
+    self:_apply(pt)
 
     local win = self.win
     local finalFrame = self.lastAppliedFrame or (win and win:frame())

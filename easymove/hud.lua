@@ -124,15 +124,6 @@ function HUD:update(mode, frame, pt, corner)
   local pillX = math.floor(pt.x - (pillW / 2) + 0.5)
   local pillY = math.floor(pt.y - pillH - 24 + 0.5)
 
-  -- Ensure pill stays within the screen
-  local screen = hs.mouse.getCurrentScreen()
-  if screen then
-    local sf = screen:frame()
-    if pillX < sf.x + 8 then pillX = sf.x + 8 end
-    if (pillX + pillW) > (sf.x + sf.w - 8) then pillX = sf.x + sf.w - pillW - 8 end
-    if pillY < sf.y + 8 then pillY = pt.y + 28 end
-  end
-
   if pillX ~= self.lastPillX or pillY ~= self.lastPillY then
     self.lastPillX, self.lastPillY = pillX, pillY
     self.pillCanvas:topLeft({ x = pillX, y = pillY })
@@ -153,7 +144,16 @@ function HUD:update(mode, frame, pt, corner)
       cx, cy = frame.x + frame.w - 12, frame.y - 12
     elseif corner == "bl" then
       cx, cy = frame.x - 12, frame.y + frame.h - 12
+    elseif corner == "l" then
+      cx, cy = frame.x - 12, frame.y + (frame.h / 2) - 12
+    elseif corner == "r" then
+      cx, cy = frame.x + frame.w - 12, frame.y + (frame.h / 2) - 12
+    elseif corner == "t" then
+      cx, cy = frame.x + (frame.w / 2) - 12, frame.y - 12
+    elseif corner == "b" then
+      cx, cy = frame.x + (frame.w / 2) - 12, frame.y + frame.h - 12
     else
+      -- "br" or "center"
       cx, cy = frame.x + frame.w - 12, frame.y + frame.h - 12
     end
 
