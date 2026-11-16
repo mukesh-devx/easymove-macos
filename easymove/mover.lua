@@ -1,6 +1,6 @@
 --- Eventtap controller handling modifier-click window move and resize.
 --- High-frequency eventtap tracking throttled to 120Hz display refresh.
---- Delivers instant, zero-lag 1:1 cursor tracking with 9-region natural resizing.
+--- Seamlessly integrated with FancyZones: hold Shift during Alt-Drag to snap into zones!
 
 local util = require("easymove.util")
 local resizeMath = require("easymove.resize_math")
@@ -44,6 +44,18 @@ local function fastSetFrame(win, frame)
   end
 end
 
+--- Query FancyZones overlay if FancyZones is active.
+local function getFancyZonesOverlay()
+  local ok, fz = pcall(require, "fancyzones")
+  if not ok or not fz or not fz.isRunning or not fz.isRunning() then return nil end
+  if not fz.isSnappingEnabled or not fz.isSnappingEnabled() then return nil end
+  local _, fzState = debug.getupvalue(fz.start, 1)
+  if fzState and fzState.overlay then
+    return fzState.overlay
+  end
+  return nil
+end
+
 function Mover.new(cfg, hud)
   local self = setmetatable({
     cfg = cfg,
@@ -63,6 +75,9 @@ function Mover.new(cfg, hud)
     lastAppliedFrame = nil,
     axApp = nil,
     wasEnhanced = nil,
+    -- FancyZones bridge
+    fzActive = false,
+    fzTarget = nil,
   }, Mover)
 
   self:updateExcluded(cfg.excludedApps)
@@ -83,6 +98,7 @@ function Mover:start()
   local events = {
     T.leftMouseDown, T.leftMouseDragged, T.leftMouseUp,
     T.rightMouseDown, T.rightMouseDragged, T.rightMouseUp,
+    T.flagsChanged,
   }
 
   self.tap = hs.eventtap.new(events, function(e)
@@ -128,6 +144,13 @@ function Mover:isEnabled()
 end
 
 function Mover:_reset()
+  if self.fzActive then
+    local fzOverlay = getFancyZonesOverlay()
+    if fzOverlay then fzOverlay:hide() end
+    self.fzActive = false
+    self.fzTarget = nil
+  end
+
   -- Restore AXEnhancedUserInterface if we temporarily disabled it
   if self.axApp and self.wasEnhanced then
     local ax = self.axApp
@@ -147,7 +170,7 @@ function Mover:_reset()
   if self.hud then self.hud:hide() end
 end
 
-function Mover:_apply(pt)
+function Mover:_apply(pt, flags)
   if not (self.active and self.win and self.initialFrame and self.startPt) then return end
 
   local dx = pt.x - self.startPt.x
@@ -173,6 +196,27 @@ function Mover:_apply(pt)
       end
     end
   end
+
+  -- FancyZones integration during window move
+  if self.mode == "move" and flags then
+    local wantSnap = flags.shift == true
+    local fzOverlay = getFancyZonesOverlay()
+    if fzOverlay then
+      if wantSnap then
+        if not self.fzActive then
+          fzOverlay:show()
+          self.fzActive = true
+        end
+        self.fzTarget = fzOverlay:update(pt)
+      else
+        if self.fzActive then
+          fzOverlay:hide()
+          self.fzActive = false
+          self.fzTarget = nil
+        end
+      end
+    end
+  end
 end
 
 function Mover:_handleEvent(e)
@@ -180,6 +224,13 @@ function Mover:_handleEvent(e)
   local T = hs.eventtap.event.types
   local flags = e:getFlags()
   local pt = e:location()
+
+  -- Shift key pressed/released mid-drag
+  if t == T.flagsChanged and self.active and self.mode == "move" then
+    local curPt = hs.mouse.absolutePosition()
+    self:_apply(curPt, flags)
+    return false
+  end
 
   -- Check if button matches Move or Resize
   local isLeft = (t == T.leftMouseDown or t == T.leftMouseDragged or t == T.leftMouseUp)
@@ -191,7 +242,7 @@ function Mover:_handleEvent(e)
   -- 1. Mouse Button Down: Check if modifier is held to initiate gesture
   if isDown then
     if not util.hasModifiers(flags, self.cfg.modifiers) then
-      return false -- Modifier not held, let normal click through
+      return false -- Modifier not held, let normal click through to apps & FancyZones
     end
 
     local mode
@@ -238,6 +289,8 @@ function Mover:_handleEvent(e)
     self.initialFrame = { x = frame.x, y = frame.y, w = frame.w, h = frame.h }
     self.lastFrameTicks = hs.timer.absoluteTime()
     self.lastAppliedFrame = self.initialFrame
+    self.fzActive = false
+    self.fzTarget = nil
 
     if mode == "resize" then
       self.corner = resizeMath.quadrant(pt, self.initialFrame)
@@ -257,7 +310,7 @@ function Mover:_handleEvent(e)
     local now = hs.timer.absoluteTime()
     if (now - self.lastFrameTicks) >= THROTTLE_TICKS then
       self.lastFrameTicks = now
-      self:_apply(pt)
+      self:_apply(pt, flags)
     end
     return true -- Consume drag
   end
@@ -265,13 +318,19 @@ function Mover:_handleEvent(e)
   -- 3. Mouse Up: End interaction cleanly
   if isUp and self.active then
     -- Commit final coordinates
-    self:_apply(pt)
+    self:_apply(pt, flags)
 
     local win = self.win
+    local target = self.fzTarget
+    local wasFZ = self.fzActive
     local finalFrame = self.lastAppliedFrame or (win and win:frame())
     self:_reset()
 
-    if win and finalFrame then
+    if wasFZ and target and win then
+      -- Snapped into FancyZones zone!
+      local rect = { x = target.rect.x, y = target.rect.y, w = target.rect.w, h = target.rect.h }
+      fastSetFrame(win, rect)
+    elseif win and finalFrame then
       fastSetFrame(win, finalFrame)
     end
 
