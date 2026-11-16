@@ -1,4 +1,5 @@
 --- Eventtap controller handling modifier-click window move and resize.
+--- Optimized for ultra-low latency, zero event queue saturation, and instant 1:1 mouse tracking.
 
 local util = require("easymove.util")
 local resizeMath = require("easymove.resize_math")
@@ -6,6 +7,8 @@ local log = require("easymove.log")
 
 local Mover = {}
 Mover.__index = Mover
+
+local THROTTLE_INTERVAL = 0.008 -- ~120 Hz update cap (eliminates event queue backlog)
 
 local function isSnappableWindow(win, excluded)
   if not win then return false end
@@ -38,14 +41,20 @@ function Mover.new(cfg, hud)
     enabled = true,
     tap = nil,
     watchdog = nil,
+    flushTimer = nil,
     excluded = {},
     -- Gesture State
     active = false,
-    mode = nil,        -- "move" | "resize"
+    mode = nil,            -- "move" | "resize"
     win = nil,
     startPt = nil,
     initialFrame = nil,
-    corner = nil,      -- "tl" | "tr" | "bl" | "br"
+    corner = nil,          -- "tl" | "tr" | "bl" | "br"
+    latestPt = nil,
+    lastFrameTime = 0,
+    lastAppliedFrame = nil,
+    axApp = nil,
+    wasEnhanced = nil,
   }, Mover)
 
   self:updateExcluded(cfg.excludedApps)
@@ -90,6 +99,7 @@ end
 function Mover:stop()
   self:_reset()
   if self.watchdog then self.watchdog:stop(); self.watchdog = nil end
+  if self.flushTimer then self.flushTimer:stop(); self.flushTimer = nil end
   if self.tap then self.tap:stop(); self.tap = nil end
   if self.hud then self.hud:hide() end
 end
@@ -111,13 +121,57 @@ function Mover:isEnabled()
 end
 
 function Mover:_reset()
+  if self.flushTimer then
+    self.flushTimer:stop()
+    self.flushTimer = nil
+  end
+
+  -- Restore AXEnhancedUserInterface if we temporarily disabled it
+  if self.axApp and self.wasEnhanced then
+    local ax = self.axApp
+    pcall(function() ax.AXEnhancedUserInterface = true end)
+    self.axApp = nil
+    self.wasEnhanced = nil
+  end
+
   self.active = false
   self.mode = nil
   self.win = nil
   self.startPt = nil
   self.initialFrame = nil
   self.corner = nil
+  self.latestPt = nil
+  self.lastFrameTime = 0
+  self.lastAppliedFrame = nil
   if self.hud then self.hud:hide() end
+end
+
+function Mover:_apply(pt)
+  if not (self.active and self.win and self.initialFrame and self.startPt) then return end
+
+  local dx = pt.x - self.startPt.x
+  local dy = pt.y - self.startPt.y
+  local newFrame
+
+  if self.mode == "move" then
+    newFrame = resizeMath.calculateMove(self.initialFrame, dx, dy)
+  elseif self.mode == "resize" then
+    newFrame = resizeMath.calculateResize(
+      self.initialFrame, dx, dy, self.corner,
+      self.cfg.minWidth, self.cfg.minHeight
+    )
+  end
+
+  if newFrame then
+    local last = self.lastAppliedFrame
+    if not last or last.x ~= newFrame.x or last.y ~= newFrame.y or last.w ~= newFrame.w or last.h ~= newFrame.h then
+      self.lastAppliedFrame = newFrame
+      pcall(function() self.win:setFrame(newFrame, 0) end)
+      if self.hud then
+        self.hud:update(self.mode, newFrame, pt, self.corner)
+      end
+    end
+  end
 end
 
 function Mover:_handleEvent(e)
@@ -158,8 +212,22 @@ function Mover:_handleEvent(e)
     local frame = win:frame()
     if not frame then return false end
 
+    -- Disable AXEnhancedUserInterface temporarily to prevent macOS from enforcing 200ms resize animations
+    local app = win:application()
+    local axApp = app and hs.axuielement.applicationElement(app)
+    self.axApp = axApp
+    self.wasEnhanced = nil
+    if axApp then
+      local ok, val = pcall(function() return axApp.AXEnhancedUserInterface end)
+      if ok and val == true then
+        self.wasEnhanced = true
+        pcall(function() axApp.AXEnhancedUserInterface = false end)
+      end
+    end
+
+    -- Fast raise window without heavy AppKit focus context switch
     if self.cfg.bringToFrontOnGrab then
-      pcall(function() win:focus() end)
+      pcall(function() win:raise() end)
     end
 
     self.active = true
@@ -167,11 +235,23 @@ function Mover:_handleEvent(e)
     self.win = win
     self.startPt = { x = pt.x, y = pt.y }
     self.initialFrame = { x = frame.x, y = frame.y, w = frame.w, h = frame.h }
+    self.latestPt = { x = pt.x, y = pt.y }
+    self.lastFrameTime = hs.timer.secondsSinceEpoch()
+    self.lastAppliedFrame = self.initialFrame
 
     if mode == "resize" then
       self.corner = resizeMath.quadrant(pt, self.initialFrame)
     else
       self.corner = nil
+    end
+
+    -- Ensure delayed flush timer exists
+    if not self.flushTimer then
+      self.flushTimer = hs.timer.delayed.new(0.016, function()
+        if self.active and self.latestPt then
+          self:_apply(self.latestPt)
+        end
+      end)
     end
 
     if self.hud then
@@ -181,26 +261,17 @@ function Mover:_handleEvent(e)
     return true -- Consume mouse-down so the target app doesn't click or select
   end
 
-  -- 2. Mouse Dragged: Update window position or size 1:1
+  -- 2. Mouse Dragged: Throttled update to avoid event queue saturation
   if isDrag and self.active and self.win then
-    local dx = pt.x - self.startPt.x
-    local dy = pt.y - self.startPt.y
-    local newFrame
+    self.latestPt = pt
 
-    if self.mode == "move" then
-      newFrame = resizeMath.calculateMove(self.initialFrame, dx, dy)
-    elseif self.mode == "resize" then
-      newFrame = resizeMath.calculateResize(
-        self.initialFrame, dx, dy, self.corner,
-        self.cfg.minWidth, self.cfg.minHeight
-      )
-    end
-
-    if newFrame then
-      pcall(function() self.win:setFrame(newFrame, 0) end)
-      if self.hud then
-        self.hud:update(self.mode, newFrame, pt, self.corner)
-      end
+    local now = hs.timer.secondsSinceEpoch()
+    if (now - self.lastFrameTime) >= THROTTLE_INTERVAL then
+      self.lastFrameTime = now
+      self:_apply(pt)
+    else
+      -- Schedule flush to ensure the exact final point is rendered even if mouse stops
+      if self.flushTimer then self.flushTimer:start() end
     end
 
     return true -- Consume drag
@@ -208,18 +279,21 @@ function Mover:_handleEvent(e)
 
   -- 3. Mouse Up: End interaction cleanly
   if isUp and self.active then
-    local win = self.win
-    local finalFrame = self.win and self.win:frame()
-    self:_reset()
-
-    -- Safety pass: ensure window committed the final dimensions
-    if win and finalFrame then
-      hs.timer.doAfter(0.05, function()
-        pcall(function() win:setFrame(finalFrame, 0) end)
-      end)
+    if self.flushTimer then self.flushTimer:stop() end
+    if self.latestPt then
+      self:_apply(self.latestPt)
     end
 
-    return true -- Consume mouse-up so it doesn't trigger context menu or click
+    local win = self.win
+    local finalFrame = self.lastAppliedFrame or (win and win:frame())
+    self:_reset()
+
+    -- Final commit pass
+    if win and finalFrame then
+      pcall(function() win:setFrame(finalFrame, 0) end)
+    end
+
+    return true -- Consume mouse-up
   end
 
   return false

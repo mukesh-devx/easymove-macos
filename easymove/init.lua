@@ -35,6 +35,9 @@ end
 function M.start(userConfig)
   if state.running then M.stop() end
 
+  -- Globally eliminate window animation delay so setFrame is instant and glued to mouse
+  hs.window.animationDuration = 0
+
   local cfg = config.merge(config.defaults(), userConfig or {})
   cfg.modifiers = config.normalizeMods(cfg.modifiers)
   log.setLevel(cfg.logLevel)

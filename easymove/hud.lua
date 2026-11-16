@@ -17,6 +17,12 @@ function HUD.new(cfg)
     pillCanvas = nil,
     cornerCanvas = nil,
     visible = false,
+    cornerVisible = false,
+    lastText = nil,
+    lastPillX = nil,
+    lastPillY = nil,
+    lastCornerX = nil,
+    lastCornerY = nil,
   }, HUD)
   self:_initCanvases()
   return self
@@ -95,10 +101,6 @@ function HUD:_initCanvases()
 end
 
 --- Show or update the HUD during active move/resize.
---- mode: "move" | "resize"
---- frame: { x, y, w, h } of the current window
---- pt: { x, y } mouse pointer position
---- corner: "tl" | "tr" | "bl" | "br" (optional, for resize)
 function HUD:update(mode, frame, pt, corner)
   if not self.cfg.showHUD then return end
 
@@ -111,13 +113,16 @@ function HUD:update(mode, frame, pt, corner)
     symbol = "✥"
   end
 
-  self.pillCanvas:elementAttribute(2, "text", symbol)
-  self.pillCanvas:elementAttribute(3, "text", text)
+  if text ~= self.lastText then
+    self.lastText = text
+    self.pillCanvas:elementAttribute(2, "text", symbol)
+    self.pillCanvas:elementAttribute(3, "text", text)
+  end
 
-  -- Calculate pill position (floats 28pt above cursor)
+  -- Calculate pill position (floats 24pt above cursor)
   local pillW, pillH = 136, 32
-  local pillX = pt.x - (pillW / 2)
-  local pillY = pt.y - pillH - 24
+  local pillX = math.floor(pt.x - (pillW / 2) + 0.5)
+  local pillY = math.floor(pt.y - pillH - 24 + 0.5)
 
   -- Ensure pill stays within the screen
   local screen = hs.mouse.getCurrentScreen()
@@ -128,11 +133,15 @@ function HUD:update(mode, frame, pt, corner)
     if pillY < sf.y + 8 then pillY = pt.y + 28 end
   end
 
-  self.pillCanvas:topLeft({ x = pillX, y = pillY })
+  if pillX ~= self.lastPillX or pillY ~= self.lastPillY then
+    self.lastPillX, self.lastPillY = pillX, pillY
+    self.pillCanvas:topLeft({ x = pillX, y = pillY })
+  end
 
   if not self.visible then
-    self.pillCanvas:show(0.08)
+    self.pillCanvas:show(0.05)
     self.pillCanvas:bringToFront(true)
+    self.visible = true
   end
 
   -- Update corner indicator for resize
@@ -147,9 +156,14 @@ function HUD:update(mode, frame, pt, corner)
     else
       cx, cy = frame.x + frame.w - 12, frame.y + frame.h - 12
     end
-    self.cornerCanvas:topLeft({ x = cx, y = cy })
+
+    if cx ~= self.lastCornerX or cy ~= self.lastCornerY then
+      self.lastCornerX, self.lastCornerY = cx, cy
+      self.cornerCanvas:topLeft({ x = cx, y = cy })
+    end
+
     if not self.cornerVisible then
-      self.cornerCanvas:show(0.08)
+      self.cornerCanvas:show(0.05)
       self.cornerCanvas:bringToFront(true)
       self.cornerVisible = true
     end
@@ -157,20 +171,25 @@ function HUD:update(mode, frame, pt, corner)
     if self.cornerVisible then
       self.cornerCanvas:hide(0.08)
       self.cornerVisible = false
+      self.lastCornerX = nil
+      self.lastCornerY = nil
     end
   end
-
-  self.visible = true
 end
 
 function HUD:hide()
   if self.visible then
-    self.pillCanvas:hide(0.12)
+    self.pillCanvas:hide(0.08)
     self.visible = false
+    self.lastText = nil
+    self.lastPillX = nil
+    self.lastPillY = nil
   end
   if self.cornerVisible then
-    self.cornerCanvas:hide(0.12)
+    self.cornerCanvas:hide(0.08)
     self.cornerVisible = false
+    self.lastCornerX = nil
+    self.lastCornerY = nil
   end
 end
 
