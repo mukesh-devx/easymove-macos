@@ -24,7 +24,7 @@ local function drawIcon(enabled)
   if enabled then
     -- Inner resize arrow glyph
     c[2] = {
-      type = "lines",
+      type = "segments",
       action = "stroke",
       strokeColor = strokeCol,
       strokeWidth = strokeW,
@@ -35,7 +35,7 @@ local function drawIcon(enabled)
       },
     }
     c[3] = {
-      type = "lines",
+      type = "segments",
       action = "stroke",
       strokeColor = strokeCol,
       strokeWidth = strokeW,
@@ -47,7 +47,7 @@ local function drawIcon(enabled)
   else
     -- Diagonal slash for disabled state
     c[2] = {
-      type = "lines",
+      type = "segments",
       action = "stroke",
       strokeColor = strokeCol,
       strokeWidth = strokeW,
