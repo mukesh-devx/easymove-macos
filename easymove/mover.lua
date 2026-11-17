@@ -36,12 +36,22 @@ local function windowUnderPoint(pt, excluded)
   return nil
 end
 
-local function fastSetFrame(win, frame)
-  if win._setFrame then
-    return pcall(win._setFrame, win, frame)
-  else
-    return pcall(win.setFrame, win, frame, 0)
+local function notifyStageLight(win, frame)
+  local sl = package.loaded["stagelight"]
+  if sl and sl.onWindowMoved then
+    pcall(sl.onWindowMoved, win, frame)
   end
+end
+
+local function fastSetFrame(win, frame)
+  local ok
+  if win._setFrame then
+    ok = pcall(win._setFrame, win, frame)
+  else
+    ok = pcall(win.setFrame, win, frame, 0)
+  end
+  notifyStageLight(win, frame)
+  return ok
 end
 
 --- Query FancyZones overlay if FancyZones is active.
