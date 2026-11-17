@@ -302,6 +302,11 @@ function Mover:_handleEvent(e)
     self.fzActive = false
     self.fzTarget = nil
 
+    local sl = package.loaded["stagelight"]
+    if sl and sl.onDragStart then
+      pcall(sl.onDragStart)
+    end
+
     if mode == "resize" then
       self.corner = resizeMath.quadrant(pt, self.initialFrame)
     else
@@ -340,8 +345,16 @@ function Mover:_handleEvent(e)
       -- Snapped into FancyZones zone!
       local rect = { x = target.rect.x, y = target.rect.y, w = target.rect.w, h = target.rect.h }
       fastSetFrame(win, rect)
+      local sl = package.loaded["stagelight"]
+      if sl and sl.onDragEnd then
+        pcall(sl.onDragEnd, win, rect)
+      end
     elseif win and finalFrame then
       fastSetFrame(win, finalFrame)
+      local sl = package.loaded["stagelight"]
+      if sl and sl.onDragEnd then
+        pcall(sl.onDragEnd, win, finalFrame)
+      end
     end
 
     return true -- Consume mouse-up
